@@ -3,10 +3,13 @@ from collections import OrderedDict
 import json
 from six.moves import http_cookies as Cookie
 import shlex
+import re
 
 parser = argparse.ArgumentParser()
 parser.add_argument('command')
-parser.add_argument('url', nargs="?")
+#parser.add_argument('url', nargs="?")
+# argument created internally
+#parser.add_argument('--url', nargs="?")
 parser.add_argument('-d', '--data')
 parser.add_argument('-b', '--data-binary', default=None)
 parser.add_argument('-i', default=None)
@@ -17,10 +20,19 @@ parser.add_argument('--insecure', action='store_true')
 
 
 def parse(curl_command):
-    method = "get"
+    url = ''
+    method = 'get'
 
     tokens = shlex.split(curl_command)
-    parsed_args = parser.parse_args(tokens)
+    parsed_args, unknown_args = parser.parse_known_args(tokens)
+
+    # check if valid url
+    if re.match('http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\(\), ]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', unknown_args[0]) and \
+       len(unknown_args) == 1:
+        url = unknown_args[0]
+    else:
+        print "Unknown curl arguments: ", unknown_args
+        exit()
 
     base_indent = " " * 4
     data_token = ''
@@ -31,7 +43,16 @@ def parse(curl_command):
     if parsed_args.i is not None:
         final_url = parsed_args.i
     else:
-        final_url = parsed_args.url
+        final_url = url
+
+    # remove unknown url
+    tokens = [ i for i in tokens if not i.startswith(final_url) ]
+    # add url to the list
+    tokens.append('--url')
+    tokens.append(final_url)
+    # reparse with the url included
+    parser.add_argument('--url')
+    parser.parse_args(args=tokens, namespace=parsed_args)
 
     if post_data:
         method = 'post'

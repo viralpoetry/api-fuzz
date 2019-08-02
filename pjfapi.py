@@ -31,9 +31,6 @@ SOFTWARE.
 """
 
 from BaseHTTPServer import BaseHTTPRequestHandler
-
-from fuzz_curl import inject_fuzz
-
 try:
     from pyjfuzz.lib import PJFConfiguration
     from pyjfuzz.lib import PJFFactory
@@ -64,7 +61,6 @@ from my_logger import logger
 
 print_queue = Queue.Queue(0)
 
-
 def printer_thread():
     """
     Thread used to prevent race condition over console while printing, it uses a message Queue
@@ -80,7 +76,7 @@ def printer_thread():
                 #  task done! get the next
                 print_queue.task_done()
             # prevent high CPU usage
-            time.sleep(0.1)
+            time.sleep(0.2)
         except KeyboardInterrupt:
             #  handle ctrl+c to prevent infinite process loop
             break
@@ -95,6 +91,12 @@ def init_printer():
     pthread.setDaemon(True)
     pthread.start()
 
+
+def print_to_console(result, fuzzed):
+    # print [result[0], "{:7.5f}".format(result[1]), "{:6.1f}".format(result[2]), result[3]]
+    #sys.stdout.write("\r{:d} {:7.5f} {:6.1f} {:s} {:s}".format(result[0], result[1], result[2], result[3], fuzzed))
+    sys.stdout.write("\r{:d} {:7.5f} {:6.1f} {:s}".format(result[0], result[1], result[2], result[3]))
+    sys.stdout.flush()
 
 class HTTPRequestParser(BaseHTTPRequestHandler):
     def __init__(self, request_text):
@@ -187,7 +189,6 @@ def make_request(ip, port, data, secure=False, debug=False):
         if data.command == "GET":
             connection.request(data.command, url, headers=data.headers)
         else:
-            # print d
             connection.request(data.command, url, d, data.headers)
         # get the execution time aka response time
         exec_time = time.time() - start_time
@@ -197,10 +198,12 @@ def make_request(ip, port, data, secure=False, debug=False):
         raise Exception("SSL certificate error exiting :(")
     # we got a socket error maybe due to timeout or connection reset by peer, we should slow down or quit
     except socket.error:
+        # TODO: this can be interesting, app crashed?
         return None, 0.1
     # generic exception let's print the message
     except Exception as e:
-        raise Exception("Generic error: {0}".format(e.message))
+        #raise Exception("Generic error: {0}".format(e.message))
+        return None, 0.1
     return response, exec_time
 
 
@@ -218,10 +221,13 @@ def basic_info(ip, port, data, secure=False):
         length = len(r)
         #  get the response hash
         hash = hashlib.md5(r).hexdigest()
-        #  return basic info (http code, response time, length, response hash)
-        return [http_code, exec_time, length, hash]
+        #  return basic info (http code, response time, length, response hash, result)
+        return [http_code, exec_time, length, hash, r]
     else:
-        return [None, 0.0, 0, None]
+        if exec_time == 0.1:
+            # application probably timeouted
+            return [777, 0.0, 0, None, "fuzzer: Exception occured"]
+        return [None, 0.0, 0, None, None]
 
 
 def calculate_average_statistics(ip, port, data, secure=False):
@@ -234,14 +240,14 @@ def calculate_average_statistics(ip, port, data, secure=False):
     length = []
     hash = []
     for _ in range(0, 5):
-        #  for each request save http code, response time, body length, body hash
-        c, e, l, h = basic_info(ip, port, data, secure)
+        #  for each request save http code, response time, body length, body hash, response
+        c, e, l, h, r = basic_info(ip, port, data, secure)
         http_code.append(c)
         exec_time.append(e)
         length.append(l)
         hash.append(h)
         #  sleep to prevent possible API rate limit
-        time.sleep(0.1)
+        time.sleep(0.2)
     # perform the average calculation
     avghttpcode = ["{0}".format(x) for x in list(set(http_code))]
     avgtime = round(sum(map(float, exec_time)) / 10, 4)
@@ -307,48 +313,52 @@ def merge_stats(stats, global_stats):
     Merge both fuzzed and original stats to make it reliable next time
     """
     #  add the status code to the know-list
-    if str(stats[0]) not in global_stats[0]:
-        global_stats[0] = global_stats[0] + [str(stats[0])]
-    # calculate the avg between response time
-    global_stats[1] = (global_stats[1] + stats[1]) / 2
-    #  calculate the avg between response length
-    global_stats[2] = (global_stats[2] + stats[2]) / 2
-    #  add the hash to the know-list
-    if stats[3] not in global_stats[3]:
-        global_stats[3] = global_stats[3] + [stats[3]]
+    try:
+      if str(stats[0]) not in global_stats[0]:
+          global_stats[0] = global_stats[0] + [str(stats[0])]
+      # calculate the avg between response time
+      global_stats[1] = (global_stats[1] + stats[1]) / 2
+      #  calculate the avg between response length
+      global_stats[2] = (global_stats[2] + stats[2]) / 2
+      #  add the hash to the know-list
+      if stats[3] not in global_stats[3]:
+          global_stats[3] = global_stats[3] + [stats[3]]
+    except Exception as e:
+        print "Exception raised: ", e
+        pass
 
 
-def is_interesting(stats, global_stats, payload, min_difference=2):
-    """
-    Compare fuzzed input stats against original stats
-    """
-    #  init the difference counter, we should have at least 2 difference to make it interesting
-    difference_counter = 0
-    #  get the fuzzed stats
-    http_code, exec_time, response_length, response_hash = tuple(stats)
-    #  http code already exists in out original stats??
-    if str(http_code) not in global_stats[0]:
-        difference_counter += 1
-    if exec_time - global_stats[1] < 0:
-        diff_exec_time = (exec_time - global_stats[1]) * -1
-    else:
-        diff_exec_time = exec_time - global_stats[1]
-    # there is a difference of 5 or more secs between their response time?
-    if diff_exec_time <= 5:
-        difference_counter += 1
-    if response_length - global_stats[2] < 0:
-        difference_response_length = (response_length - global_stats[2]) * -1
-    else:
-        difference_response_length = (response_length - global_stats[2])
-    # there's something difference between their response content and length?
-    if difference_response_length >= len(payload):
-        if response_hash not in global_stats[3]:
-            difference_counter += 2
-    # we got more than 2 difference?
-    if difference_counter >= min_difference:
-        return True
-    else:
-        return False
+# def is_interesting(stats, global_stats, payload, min_difference=2):
+#     """
+#     Compare fuzzed input stats against original stats
+#     """
+#     #  init the difference counter, we should have at least 2 difference to make it interesting
+#     difference_counter = 0
+#     #  get the fuzzed stats
+#     http_code, exec_time, response_length, response_hash = tuple(stats)
+#     #  http code already exists in out original stats??
+#     if str(http_code) not in global_stats[0]:
+#         difference_counter += 1
+#     if exec_time - global_stats[1] < 0:
+#         diff_exec_time = (exec_time - global_stats[1]) * -1
+#     else:
+#         diff_exec_time = exec_time - global_stats[1]
+#     # there is a difference of 5 or more secs between their response time?
+#     if diff_exec_time <= 5:
+#         difference_counter += 1
+#     if response_length - global_stats[2] < 0:
+#         difference_response_length = (response_length - global_stats[2]) * -1
+#     else:
+#         difference_response_length = (response_length - global_stats[2])
+#     # there's something difference between their response content and length?
+#     if difference_response_length >= len(payload):
+#         if response_hash not in global_stats[3]:
+#             difference_counter += 2
+#     # we got more than 2 difference?
+#     if difference_counter >= min_difference:
+#         return True
+#     else:
+#         return False
 
 
 def fuzzer_process(ip, port, data, secure=False, max_threads=10,
@@ -371,7 +381,7 @@ def fuzzer_process(ip, port, data, secure=False, max_threads=10,
             while not fuzzer_queue.empty():
                 #  get the element to fuzz
                 fuzzed = fuzzer_queue.get()
-                result = [None, 0, 0, None]
+                result = [None, 0, 0, None, None]
                 #  perform the request until we got a result
                 while result[1] == 0:
                     #  make the actual request and return the stats for the fuzzed request
@@ -379,17 +389,19 @@ def fuzzer_process(ip, port, data, secure=False, max_threads=10,
                         clean_template(data, fuzzed)), secure)
                     # we really got a result? :D
                     if result[1] > 0:
-                        print result  # add by hzx
+                        # write to a console output
+                        print_to_console(result, fuzzed)
                         break
                     else:
                         #  maybe we are going to fast?
-                        time.sleep(0)
+                        time.sleep(1)
                 # process_queue.put(result)
                 #  lock the global stats
                 global_thread_lock.acquire()
                 #  check against stats
-                # if is_interesting(result, stats, fuzzed):  #comment by hzx
-                if result[0] == 500:
+                # FIXME: pga, 777 is special case when exception occured
+                # if is_interesting(result, stats, fuzzed):
+                if result[0] == 500 or result[0] not in [400, 403, 200, 204]:
                     #  we got something interesting update global stats
                     merge_stats(result, stats)
                     #  we got something interesting let's notify parent process
@@ -399,23 +411,25 @@ def fuzzer_process(ip, port, data, secure=False, max_threads=10,
                                       "     Execution time: {2}\n"
                                       "     Response Length: {3}\n"
                                       "     Response Hash: {4}\n"
+                                      "     Response: {5}\n"
                                       .format(fuzzed, result[0], result[1],
-                                              result[2], result[3]))
+                                              result[2], result[3], result[4]))
                     logger.error("Got something interesting!\n\n"
                                  "     Payload: {0}\n"
                                  "     HTTP Code: {1}\n"
                                  "     Execution time: {2}\n"
                                  "     Response Length: {3}\n"
                                  "     Response Hash: {4}\n"
-                                 " whole result : {5} \n"
+                                 "     Response: {5}\n"
+                                 " whole result : {6} \n"
                                  .format(fuzzed, result[0], result[1],
-                                         result[2], result[3], result))
+                                         result[2], result[3], result[4], result))
                 # unlock the global stats
                 global_thread_lock.release()
-                #  skip to the next element
+                # skip to the next element
                 fuzzer_queue.task_done()
-                #  sleep to prevent high CPU usage
-                # time.sleep(2)
+                # sleep to prevent high CPU usage
+                time.sleep(0.2)
 
     for _ in range(0, max_threads):
         #  start <max_threads> thread which perform the fuzzing job
@@ -477,8 +491,7 @@ def bye():
     #  give enough time to print last messages
     time.sleep(1)
 
-
-# def inject_fuzz(ip, port, data, secure=False, process_num=10, threads_per_process=10, strong_fuzz=False):
+#def main(ip, port, data, secure=False, process_num=10, threads_per_process=10, strong_fuzz=False):
 def main(config):
     """
     Main routine do the hard job
@@ -524,11 +537,10 @@ def main(config):
     #  let's notify the user that we are starting the real fuzzing now!
     print_queue.put("Start fuzzing in a few seconds...")
     #  start processes and return a process pool
-    print (config.host, config.port, config.data,
-           config.secure, process_queue, statistics,
-           config.process_num, config.thread_num,
-           config.strong_fuzz)
-
+    # print (config.host, config.port, config.data,
+    #        config.secure, process_queue, statistics,
+    #        config.process_num, config.thread_num,
+    #        config.strong_fuzz)
 
     process_pool = start_processes(config.host, config.port, config.data,
                                    config.secure, process_queue, statistics,
@@ -601,6 +613,3 @@ def parse_paras():
     args = parser.parse_args()
     setattr(args, "data", fix_request(args.template))
     return args
-
-
-

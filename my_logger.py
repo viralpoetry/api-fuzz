@@ -35,4 +35,3 @@ logging.getLogger("paramiko").setLevel(logging.WARNING)
 
 if __name__ == "__main__":
     print os.path.join(path, "log")
-

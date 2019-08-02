@@ -57,14 +57,14 @@ def inject_fuzz(url_link):
     #  init the printer thread
     pjfapi.init_printer()
     pjfapi.print_queue.put("""
-                 _   ______             
-     /\         (_) |  ____|            
+                 _   ______
+     /\         (_) |  ____|
     /  \   _ __  _  | |__ _   _ ________
    / /\ \ | '_ \| | |  __| | | |_  /_  /
-  / ____ \| |_) | | | |  | |_| |/ / / / 
+  / ____ \| |_) | | | |  | |_| |/ / / /
  /_/    \_\ .__/|_| |_|   \__,_/___/___|
-          | |                           
-          |_|                           
+          | |
+          |_|
     """)
     pjfapi.print_queue.put("Starting api Fuzz...")
 
@@ -77,7 +77,7 @@ def inject_fuzz(url_link):
 
     # get metadata
     host, port, conf_data = uncurl_url_link(url_link)
-    process_number = 5
+    process_number = 2 #5
     threads_per_process = 10
     is_strong_fuzz = True
     secure = False
@@ -122,11 +122,8 @@ def inject_fuzz(url_link):
 
 def arg_parser():
     parser = argparse.ArgumentParser()
-    parser.add_argument("file", nargs='+',
-                        help="input file")
-
+    parser.add_argument("file", nargs='+', help="input file")
     args = parser.parse_args()
-
     return args
 
 
